@@ -1,0 +1,6 @@
+{
+  "name": "MetroPulse Fleet Telemetry",
+  "description": "Real-time urban vehicle fleet monitoring platform with spatial Socket.IO streaming, sliding-window anomaly detection, and time-series playback for any city.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
