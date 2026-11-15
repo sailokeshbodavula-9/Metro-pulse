@@ -21,6 +21,7 @@ import type {
   MongoAnalyticsSummary,
   TelemetryPoint,
 } from '../types/telemetry';
+import { apiUrl } from '../utils/api';
 
 function MiniSparkline({
   values,
@@ -531,7 +532,7 @@ export function ReportsView({
   const loadMongoSummary = useCallback(async () => {
     setLoadingSummary(true);
     try {
-      const res = await fetch('/api/analytics/mongo-summary');
+      const res = await fetch(apiUrl('/api/analytics/mongo-summary'));
       if (res.ok) {
         const data = (await res.json()) as MongoAnalyticsSummary;
         setMongoSummary(data);

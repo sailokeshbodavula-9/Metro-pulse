@@ -32,6 +32,8 @@ import { TelemetryTable } from './components/TelemetryTable';
 import { useFleetSocket } from './hooks/useFleetSocket';
 import { useLiveGps } from './hooks/useLiveGps';
 import { useSavedPlaces } from './hooks/useSavedPlaces';
+import { apiUrl } from './utils/api';
+import { geocodeDirectNominatim } from './utils/clientFallbackEngine';
 import type {
   AiRoutePlanResponse,
   AiRouteSuggestion,
@@ -72,6 +74,7 @@ const CITY_QUICK_SWITCH = [
 export default function App() {
   const {
     connectionState,
+    isEdgeFallback,
     visibleVehicles,
     subscribedTiles,
     spatialMode,
@@ -88,6 +91,9 @@ export default function App() {
     followedVehicleId,
     toggleFollow,
     updateViewport,
+    setFallbackCity,
+    updateFallbackConfig,
+    injectFallbackAnomaly,
     joinTrip,
     leaveTrip,
     publishTripPosition,
@@ -200,7 +206,7 @@ export default function App() {
     const token = new URLSearchParams(window.location.search).get('trip');
     if (!token) return;
     let cancelled = false;
-    fetch(`/api/trips/${encodeURIComponent(token)}`)
+    fetch(apiUrl(`/api/trips/${encodeURIComponent(token)}`))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data?.session) return;
@@ -231,11 +237,17 @@ export default function App() {
     const timer = window.setTimeout(async () => {
       setIsSearchingGeo(true);
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+        const res = await fetch(apiUrl(`/api/geocode?q=${encodeURIComponent(q)}`));
+        if (!res.ok) throw new Error('API geocode unavailable');
         const data = await res.json();
-        setGeoResults(Array.isArray(data?.results) ? data.results.slice(0, 5) : []);
+        const list = Array.isArray(data?.results) ? data.results.slice(0, 5) : [];
+        if (list.length > 0) {
+          setGeoResults(list);
+        } else {
+          setGeoResults(await geocodeDirectNominatim(q));
+        }
       } catch {
-        setGeoResults([]);
+        setGeoResults(await geocodeDirectNominatim(q));
       } finally {
         setIsSearchingGeo(false);
       }
@@ -260,14 +272,18 @@ export default function App() {
     speedLimitKmh?: number;
     isPaused?: boolean;
   }) => {
+    if (isEdgeFallback) {
+      updateFallbackConfig(patch);
+      return;
+    }
     try {
-      await fetch('/api/simulation/config', {
+      await fetch(apiUrl('/api/simulation/config'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
     } catch {
-      // Ignore transient network errors
+      updateFallbackConfig(patch);
     }
   };
 
@@ -281,20 +297,32 @@ export default function App() {
     setActivePoiCategory(null);
     setSelectedPoi(null);
     setDroppedPin(null);
+    if (isEdgeFallback) {
+      setFallbackCity(city);
+      return;
+    }
     try {
-      await fetch('/api/simulation/city', {
+      const res = await fetch(apiUrl('/api/simulation/city'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(city),
       });
+      if (!res.ok) {
+        setFallbackCity(city);
+      }
     } catch {
-      // Ignore transient network errors
+      setFallbackCity(city);
     }
   };
 
   const handleInjectAnomaly = async () => {
+    if (isEdgeFallback) {
+      const vid = injectFallbackAnomaly();
+      if (vid) setSelectedVehicleId(vid);
+      return;
+    }
     try {
-      const res = await fetch('/api/simulation/inject-anomaly', {
+      const res = await fetch(apiUrl('/api/simulation/inject-anomaly'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bbox: latestBboxRef.current }),
@@ -314,7 +342,8 @@ export default function App() {
         }
       }
     } catch {
-      // Ignore transient network errors
+      const vid = injectFallbackAnomaly();
+      if (vid) setSelectedVehicleId(vid);
     }
   };
 
@@ -358,10 +387,10 @@ export default function App() {
     setIsGeneratingRoutes(true);
     setRouteError(null);
     try {
-      const res = await fetch('/api/routes/suggest', {
+      const res = await fetch(apiUrl('/api/routes/suggest'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...params, activeCity }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -468,7 +497,7 @@ export default function App() {
     setDroppingPinLoading(true);
     try {
       const res = await fetch(
-        `/api/geocode/reverse?lat=${coord.lat}&lng=${coord.lng}`
+        apiUrl(`/api/geocode/reverse?lat=${coord.lat}&lng=${coord.lng}`)
       );
       if (!res.ok) throw new Error('Reverse geocode failed');
       const info = (await res.json()) as DroppedPinInfo;
@@ -493,7 +522,9 @@ export default function App() {
     const searchCoord = gpsFollow && gpsPosition ? gpsPosition : mapCenter;
     try {
       const res = await fetch(
-        `/api/places/nearby?lat=${searchCoord.lat}&lng=${searchCoord.lng}&category=${encodeURIComponent(category)}`
+        apiUrl(
+          `/api/places/nearby?lat=${searchCoord.lat}&lng=${searchCoord.lng}&category=${encodeURIComponent(category)}`
+        )
       );
       const data = await res.json();
       setPois(Array.isArray(data?.places) ? data.places : []);
@@ -562,7 +593,7 @@ export default function App() {
     lng: number;
     corridor: string;
   }) => {
-    await fetch('/api/incidents', {
+    await fetch(apiUrl('/api/incidents'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -570,7 +601,7 @@ export default function App() {
   };
 
   const handleUpvoteIncident = async (id: string) => {
-    await fetch(`/api/incidents/${encodeURIComponent(id)}/upvote`, {
+    await fetch(apiUrl(`/api/incidents/${encodeURIComponent(id)}/upvote`), {
       method: 'POST',
     });
   };

@@ -10,6 +10,8 @@ import type {
   SubscribedTile,
   TelemetryPoint,
 } from '../types/telemetry';
+import { apiUrl, getSocketNamespaceUrl } from '../utils/api';
+import { ClientTelemetryFallback } from '../utils/clientFallbackEngine';
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
@@ -40,9 +42,13 @@ export function useFleetSocket() {
   const selectedIdRef = useRef<string | null>(null);
   const vehicleMapRef = useRef<Map<string, TelemetryPoint>>(new Map());
   const viewportDebounceRef = useRef<number | null>(null);
+  const fallbackRef = useRef<ClientTelemetryFallback | null>(null);
+  const fallbackTimerRef = useRef<number | null>(null);
+  const socketConnectedRef = useRef<boolean>(false);
 
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('connecting');
+  const [isEdgeFallback, setIsEdgeFallback] = useState(false);
   const [visibleVehicles, setVisibleVehicles] = useState<TelemetryPoint[]>([]);
   const [subscribedTiles, setSubscribedTiles] = useState<SubscribedTile[]>([]);
   const [spatialMode, setSpatialMode] = useState<'overview' | 'spatial-tiles'>(
@@ -76,12 +82,80 @@ export function useFleetSocket() {
     selectedIdRef.current = selectedVehicleId;
   }, [selectedVehicleId]);
 
+  const stopEdgeFallback = useCallback(() => {
+    if (fallbackTimerRef.current !== null) {
+      window.clearInterval(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
+    setIsEdgeFallback(false);
+  }, []);
+
+  const startEdgeFallback = useCallback(() => {
+    if (socketConnectedRef.current || fallbackTimerRef.current !== null) return;
+    if (!fallbackRef.current) {
+      fallbackRef.current = new ClientTelemetryFallback(140);
+    }
+
+    setIsEdgeFallback(true);
+    setConnectionState('connected');
+    setSpatialMode('overview');
+
+    const tickFallback = () => {
+      const engine = fallbackRef.current;
+      if (!engine || socketConnectedRef.current) return;
+      const { points, metrics: nextMetrics, anomalies: newAnomalies } = engine.step();
+
+      const bbox = bboxRef.current;
+      const filtered = bbox
+        ? points.filter((p) => {
+            const [lng, lat] = p.location.coordinates;
+            return isPointInBbox(lat, lng, bbox);
+          })
+        : points;
+
+      const nextMap = new Map<string, TelemetryPoint>();
+      for (const p of filtered) {
+        nextMap.set(p.meta.vehicleId, p);
+      }
+      vehicleMapRef.current = nextMap;
+      setVisibleVehicles(filtered);
+      setMetrics(nextMetrics);
+      setMetricsHistory((prev) => {
+        const next = [...prev, nextMetrics];
+        return next.length > 36 ? next.slice(-36) : next;
+      });
+
+      if (newAnomalies.length > 0) {
+        setAnomalies((prev) => [...newAnomalies, ...prev].slice(0, 120));
+      }
+
+      if (selectedIdRef.current) {
+        const hist = engine.getVehicleHistory(selectedIdRef.current);
+        if (hist.length > 0) {
+          setSelectedHistory(hist);
+        }
+      }
+    };
+
+    tickFallback();
+    fallbackTimerRef.current = window.setInterval(tickFallback, 500);
+  }, []);
+
   useEffect(() => {
-    fetch('/api/telemetry/anomalies?limit=60')
+    fetch(apiUrl('/api/telemetry/anomalies?limit=60'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.anomalies) {
           setAnomalies(data.anomalies);
+        }
+      })
+      .catch(() => {});
+
+    fetch(apiUrl('/api/incidents'))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (Array.isArray(data?.incidents)) {
+          setIncidents(data.incidents);
         }
       })
       .catch(() => {});
@@ -93,9 +167,14 @@ export function useFleetSocket() {
       return;
     }
 
+    if (isEdgeFallback && fallbackRef.current) {
+      setSelectedHistory(fallbackRef.current.getVehicleHistory(selectedVehicleId));
+      return;
+    }
+
     let cancelled = false;
     fetch(
-      `/api/telemetry/history/${encodeURIComponent(selectedVehicleId)}?limit=60`
+      apiUrl(`/api/telemetry/history/${encodeURIComponent(selectedVehicleId)}?limit=60`)
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -112,17 +191,32 @@ export function useFleetSocket() {
       cancelled = true;
       socket?.emit('vehicle:unfollow', selectedVehicleId);
     };
-  }, [selectedVehicleId]);
+  }, [selectedVehicleId, isEdgeFallback]);
 
   useEffect(() => {
-    const socket = io('/telemetry', {
+    let connectFailures = 0;
+
+    const socket = io(getSocketNamespaceUrl(), {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
+      reconnectionDelay: 1200,
+      timeout: 3000,
     });
     socketRef.current = socket;
 
+    // If no WebSocket backend is reachable (e.g., Vercel serverless/static deployment),
+    // automatically activate the live browser telemetry engine after 2.8s so vehicles render.
+    const fallbackTimeout = window.setTimeout(() => {
+      if (!socketConnectedRef.current) {
+        startEdgeFallback();
+      }
+    }, 2800);
+
     socket.on('connect', () => {
+      socketConnectedRef.current = true;
+      connectFailures = 0;
+      window.clearTimeout(fallbackTimeout);
+      stopEdgeFallback();
       setConnectionState('connected');
       if (bboxRef.current) {
         socket.emit('viewport:update', bboxRef.current);
@@ -130,11 +224,18 @@ export function useFleetSocket() {
     });
 
     socket.on('disconnect', () => {
+      socketConnectedRef.current = false;
       setConnectionState('disconnected');
     });
 
     socket.on('connect_error', () => {
-      setConnectionState('disconnected');
+      socketConnectedRef.current = false;
+      connectFailures += 1;
+      if (connectFailures >= 2) {
+        startEdgeFallback();
+      } else {
+        setConnectionState('disconnected');
+      }
     });
 
     socket.on('telemetry:snapshot', (payload: SnapshotPayload) => {
@@ -238,13 +339,15 @@ export function useFleetSocket() {
     });
 
     return () => {
+      window.clearTimeout(fallbackTimeout);
+      stopEdgeFallback();
       if (viewportDebounceRef.current) {
         window.clearTimeout(viewportDebounceRef.current);
       }
       socket.disconnect();
       socketRef.current = null;
     };
-  }, []);
+  }, [startEdgeFallback, stopEdgeFallback]);
 
   const updateViewport = useCallback((bbox: BoundingBox) => {
     bboxRef.current = bbox;
@@ -252,8 +355,39 @@ export function useFleetSocket() {
       window.clearTimeout(viewportDebounceRef.current);
     }
     viewportDebounceRef.current = window.setTimeout(() => {
-      socketRef.current?.emit('viewport:update', bbox);
+      if (socketConnectedRef.current) {
+        socketRef.current?.emit('viewport:update', bbox);
+      } else if (fallbackRef.current) {
+        const filtered = fallbackRef.current.getLatestPoints().filter((p) => {
+          const [lng, lat] = p.location.coordinates;
+          return isPointInBbox(lat, lng, bbox);
+        });
+        setVisibleVehicles(filtered);
+      }
     }, 120);
+  }, []);
+
+  const setFallbackCity = useCallback((city: { name: string; lat: number; lng: number }) => {
+    if (!fallbackRef.current) return;
+    const info = fallbackRef.current.setCity(city.name, city.lat, city.lng);
+    setActiveCity(info);
+    setSelectedVehicleId(null);
+    setFollowedVehicleId(null);
+    setSelectedHistory([]);
+    const { points, metrics: nextMetrics } = fallbackRef.current.step();
+    setVisibleVehicles(points);
+    setMetrics(nextMetrics);
+  }, []);
+
+  const updateFallbackConfig = useCallback(
+    (patch: { vehicleCount?: number; speedLimitKmh?: number; isPaused?: boolean }) => {
+      fallbackRef.current?.updateConfig(patch);
+    },
+    []
+  );
+
+  const injectFallbackAnomaly = useCallback((): string | null => {
+    return fallbackRef.current?.injectAnomaly() ?? null;
   }, []);
 
   const selectedVehicle = useMemo(() => {
@@ -302,6 +436,7 @@ export function useFleetSocket() {
 
   return {
     connectionState,
+    isEdgeFallback,
     visibleVehicles,
     subscribedTiles,
     spatialMode,
@@ -319,6 +454,9 @@ export function useFleetSocket() {
     followedVehicleId,
     toggleFollow,
     updateViewport,
+    setFallbackCity,
+    updateFallbackConfig,
+    injectFallbackAnomaly,
     joinTrip,
     leaveTrip,
     publishTripPosition,

@@ -4,6 +4,7 @@ import type {
   SavedPlace,
   TripHistoryEntry,
 } from '../types/telemetry';
+import { apiUrl } from '../utils/api';
 
 const SAVED_PLACES_KEY = 'metropulse:saved-places:v1';
 const TRIP_HISTORY_KEY = 'metropulse:trip-history:v1';
@@ -37,8 +38,8 @@ export function useSavedPlaces() {
     const hydrate = async () => {
       try {
         const [placesRes, historyRes] = await Promise.all([
-          fetch('/api/places/saved'),
-          fetch('/api/trips/history'),
+          fetch(apiUrl('/api/places/saved')),
+          fetch(apiUrl('/api/trips/history')),
         ]);
         if (!active) return;
 
@@ -132,7 +133,7 @@ export function useSavedPlaces() {
         return [next, ...filtered].slice(0, 30);
       });
 
-      void fetch('/api/places/saved', {
+      void fetch(apiUrl('/api/places/saved'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(next),
@@ -145,7 +146,7 @@ export function useSavedPlaces() {
 
   const removePlace = useCallback((id: string) => {
     setSavedPlaces((prev) => prev.filter((p) => p.id !== id));
-    void fetch(`/api/places/saved/${encodeURIComponent(id)}`, {
+    void fetch(apiUrl(`/api/places/saved/${encodeURIComponent(id)}`), {
       method: 'DELETE',
     }).catch(() => {});
   }, []);
@@ -159,7 +160,7 @@ export function useSavedPlaces() {
       };
       setTripHistory((prev) => [next, ...prev].slice(0, 25));
 
-      void fetch('/api/trips/history', {
+      void fetch(apiUrl('/api/trips/history'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(next),
@@ -170,7 +171,7 @@ export function useSavedPlaces() {
 
   const clearTripHistory = useCallback(() => {
     setTripHistory([]);
-    void fetch('/api/trips/history', { method: 'DELETE' }).catch(() => {});
+    void fetch(apiUrl('/api/trips/history'), { method: 'DELETE' }).catch(() => {});
   }, []);
 
   return {

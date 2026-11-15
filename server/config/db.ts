@@ -254,6 +254,11 @@ class TimeSeriesStore {
   private recentWriteTimestamps: number[] = [];
 
   async connect(): Promise<void> {
+    if (mongoose.connection.readyState === 1) {
+      this.mongoConnected = true;
+      return;
+    }
+
     const mongoUri = process.env.MONGO_URI?.trim();
     if (!mongoUri) {
       console.log(

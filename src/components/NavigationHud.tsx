@@ -22,6 +22,7 @@ import type {
   RoadIncident,
   RouteStep,
 } from '../types/telemetry';
+import { apiUrl } from '../utils/api';
 
 export interface UserNavPosition {
   lat: number;
@@ -355,7 +356,7 @@ export function NavigationHud({
 
     setSharingBusy(true);
     try {
-      const res = await fetch('/api/trips/share', {
+      const res = await fetch(apiUrl('/api/trips/share'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

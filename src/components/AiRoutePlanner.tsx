@@ -30,6 +30,8 @@ import type {
   TelemetryPoint,
   TravelMode,
 } from '../types/telemetry';
+import { apiUrl } from '../utils/api';
+import { geocodeDirectNominatim } from '../utils/clientFallbackEngine';
 
 interface StopDraft {
   id: string;
@@ -185,13 +187,15 @@ export function AiRoutePlanner({
     }
     const timer = window.setTimeout(async () => {
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+        const res = await fetch(apiUrl(`/api/geocode?q=${encodeURIComponent(q)}`));
+        if (!res.ok) throw new Error('geocode unavailable');
         const data = await res.json();
+        const list = Array.isArray(data?.results) ? data.results.slice(0, 4) : [];
         setOriginSuggestions(
-          Array.isArray(data?.results) ? data.results.slice(0, 4) : []
+          list.length > 0 ? list : (await geocodeDirectNominatim(q)).slice(0, 4)
         );
       } catch {
-        setOriginSuggestions([]);
+        setOriginSuggestions((await geocodeDirectNominatim(q)).slice(0, 4));
       }
     }, 260);
     return () => window.clearTimeout(timer);
@@ -206,13 +210,15 @@ export function AiRoutePlanner({
     }
     const timer = window.setTimeout(async () => {
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+        const res = await fetch(apiUrl(`/api/geocode?q=${encodeURIComponent(q)}`));
+        if (!res.ok) throw new Error('geocode unavailable');
         const data = await res.json();
+        const list = Array.isArray(data?.results) ? data.results.slice(0, 4) : [];
         setDestSuggestions(
-          Array.isArray(data?.results) ? data.results.slice(0, 4) : []
+          list.length > 0 ? list : (await geocodeDirectNominatim(q)).slice(0, 4)
         );
       } catch {
-        setDestSuggestions([]);
+        setDestSuggestions((await geocodeDirectNominatim(q)).slice(0, 4));
       }
     }, 260);
     return () => window.clearTimeout(timer);
